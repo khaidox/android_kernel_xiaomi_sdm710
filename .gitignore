@@ -10,6 +10,7 @@
 # Normal rules
 #
 .*
+!.github
 *.o
 *.o.*
 *.a
@@ -26,6 +27,7 @@
 *.bin
 *.tar
 *.gz
+!tools/boot_assets/stock_boot.img.gz
 *.bz2
 *.lzma
 *.xz

@@ -1,0 +1,172 @@
+name: Build Xiaomi SDM710 Kernel (pyxis)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev \
+            libncurses5-dev libncursesw5-dev libelf-dev python3 python3-pip \
+            curl git ccache libtinfo5 zip
+
+      - name: Clone Toolchains
+        run: |
+          mkdir -p ../prebuilts
+          echo "Cloning Clang r416183b..."
+          git clone https://github.com/khaidox/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
+            -b lineage-20.0 ../prebuilts/clang-r416183b --depth=1
+
+          echo "Cloning GCC aarch64..."
+          git clone https://github.com/khaidox/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            -b lineage-19.1 ../prebuilts/gcc-aarch64 --depth=1
+
+          echo "Cloning GCC arm..."
+          git clone https://github.com/khaidox/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+            -b lineage-19.1 ../prebuilts/gcc-arm --depth=1
+
+      - name: Download Boot tools and GKI Module
+        run: |
+          curl -sSL https://raw.githubusercontent.com/khaidox/android_system_tools_mkbootimg/lineage-22.2/unpack_bootimg.py -o unpack_bootimg.py
+          curl -sSL https://raw.githubusercontent.com/khaidox/android_system_tools_mkbootimg/lineage-22.2/mkbootimg.py -o mkbootimg.py
+          mkdir -p gki
+          curl -sSL https://raw.githubusercontent.com/khaidox/android_system_tools_mkbootimg/lineage-22.2/gki/generate_gki_certificate.py -o gki/generate_gki_certificate.py
+          touch gki/__init__.py
+          chmod +x unpack_bootimg.py mkbootimg.py
+
+      - name: Configure Kernel
+        run: |
+          export PATH="$(pwd)/../prebuilts/clang-r416183b/bin:$(pwd)/../prebuilts/gcc-aarch64/bin:$(pwd)/../prebuilts/gcc-arm/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          SHORT_SHA=$(git rev-parse --short=8 HEAD)
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
+
+          make ARCH=arm64 sdm670-perf_defconfig xiaomi/sdm710-common.config xiaomi/pyxis.config
+          ./scripts/config --file .config --set-str LOCALVERSION "-okok-perf-${SHORT_SHA}"
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- olddefconfig
+
+      - name: Build Kernel Binary
+        run: |
+          export PATH="$(pwd)/../prebuilts/clang-r416183b/bin:$(pwd)/../prebuilts/gcc-aarch64/bin:$(pwd)/../prebuilts/gcc-arm/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          make -j$(nproc) \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            KCFLAGS="-I$(pwd)/drivers/bluetooth -I$(pwd)/drivers/clk/qcom/mdss -I$(pwd)/drivers/gpu/msm -I$(pwd)/drivers/gpu/drm/msm/sde -I$(pwd)/drivers/media/platform/msm/camera/cam_utils -I$(pwd)/drivers/media/platform/msm/camera_v3/cam_utils -I$(pwd)/drivers/soc/qcom -I$(pwd)/drivers/platform/msm/ipa/ipa_clients -I$(pwd)/drivers/platform/msm/ipa/ipa_v3 -I$(pwd)/drivers/usb/gadget" \
+            Image Image.gz-dtb
+
+      - name: Pack Boot Image and AnyKernel3 Zip
+        run: |
+          export PYTHONPATH=.
+          gunzip -f -k tools/boot_assets/stock_boot.img.gz
+          python3 unpack_bootimg.py --boot_img=tools/boot_assets/stock_boot.img --out=out_boot
+
+          python3 mkbootimg.py \
+            --kernel arch/arm64/boot/Image.gz-dtb \
+            --ramdisk out_boot/ramdisk \
+            --dtb out_boot/dtb \
+            --cmdline "console=ttyMSM0,115200n8 earlycon=msm_geni_serial,0xA90000 androidboot.hardware=qcom androidboot.console=ttyMSM0 msm_rtb.filter=0x237 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.configfs=true androidboot.usbcontroller=a600000.dwc3 swiotlb=1 loop.max_part=7 printk.devkmsg=on androidboot.init_fatal_reboot_target=recovery androidboot.super_partition=system" \
+            --base 0x00000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --second_offset 0x00000000 \
+            --tags_offset 0x00000100 \
+            --dtb_offset 0x01f00000 \
+            --pagesize 4096 \
+            --header_version 2 \
+            --os_version 15.0.0 \
+            --os_patch_level 2026-09 \
+            -o new_boot.img
+
+          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cat << EOF > AnyKernel3/anykernel.sh
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=Custom LineageOS 22.2 Kernel (-okok-perf-${SHORT_SHA}) for Xiaomi Mi 9 Lite (pyxis)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=pyxis
+          device.name2=vela
+          device.name3=mi9lite
+          supported.versions=
+          '; } # end properties
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+
+          cd AnyKernel3
+          zip -r9 ../AnyKernel3-pyxis.zip * -x .git README.md
+          cd ..
+
+      - name: Upload Boot Image & AnyKernel3 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyxis-kernel-artifacts
+          path: |
+            new_boot.img
+            AnyKernel3-pyxis.zip
+            arch/arm64/boot/Image
+            arch/arm64/boot/Image.gz-dtb
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref_name == 'lineage-22.2'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v-lineage-22.2' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Xiaomi Mi 9 Lite (pyxis) Kernel' }}
+          body: |
+            ## Custom LineageOS 22.2 Kernel for Xiaomi Mi 9 Lite (pyxis)
+            - **LOCALVERSION**: `-okok-perf-${{ env.SHORT_SHA }}`
+            - **Commit**: `${{ github.sha }}`
+
+            ### Included Files:
+            - `AnyKernel3-pyxis.zip`: Flash via TWRP / Recovery
+            - `new_boot.img`: Flash via Fastboot (`fastboot flash boot new_boot.img`)
+          files: |
+            new_boot.img
+            AnyKernel3-pyxis.zip
+            arch/arm64/boot/Image
+            arch/arm64/boot/Image.gz-dtb
+
+
