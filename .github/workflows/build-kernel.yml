@@ -48,6 +48,29 @@ jobs:
           touch gki/__init__.py
           chmod +x unpack_bootimg.py mkbootimg.py
 
+      - name: Setup KernelSU Driver
+        run: |
+          rm -rf KernelSU drivers/kernelsu
+          git clone https://github.com/khaidox/KernelSU -b pyxis KernelSU --depth=1
+          ln -sf $(pwd)/KernelSU/kernel drivers/kernelsu
+          grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
+
+          echo "=================================================="
+          echo "[CI LOG] KernelSU Repository Information:"
+          cd KernelSU
+          echo "Remote URL: $(git config --get remote.origin.url)"
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "Commit Hash: $(git rev-parse HEAD)"
+          echo "Commit Summary:"
+          git log -1 --pretty=format:"  Commit: %h%n  Author: %an <%ae>%n  Date:   %ad%n  Subject: %s"
+          echo ""
+          echo ""
+          echo "Manager Signature Config in Kbuild:"
+          grep -E "KSU_EXPECTED_SIZE|KSU_EXPECTED_HASH" kernel/Kbuild
+          cd ..
+          echo "=================================================="
+
       - name: Configure Kernel
         run: |
           export PATH="$(pwd)/../prebuilts/clang-r416183b/bin:$(pwd)/../prebuilts/gcc-aarch64/bin:$(pwd)/../prebuilts/gcc-arm/bin:$PATH"
@@ -62,8 +85,13 @@ jobs:
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
 
           make ARCH=arm64 sdm670-perf_defconfig xiaomi/sdm710-common.config xiaomi/pyxis.config
-          ./scripts/config --file .config --set-str LOCALVERSION "-okok-perf-${SHORT_SHA}"
+          ./scripts/config --file .config --set-str LOCALVERSION "-okok-ksu-${SHORT_SHA}"
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- olddefconfig
+
+          echo "=================================================="
+          echo "[CI LOG] KernelSU Kconfig & Driver Flags Check:"
+          grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_OVERLAY_FS" .config
+          echo "=================================================="
 
       - name: Build Kernel Binary
         run: |
@@ -91,7 +119,7 @@ jobs:
           python3 unpack_bootimg.py --boot_img=tools/boot_assets/stock_boot.img --out=out_boot
 
           python3 mkbootimg.py \
-            --kernel arch/arm64/boot/Image.gz-dtb \
+            --kernel arch/arm64/boot/Image \
             --ramdisk out_boot/ramdisk \
             --dtb out_boot/dtb \
             --cmdline "console=ttyMSM0,115200n8 earlycon=msm_geni_serial,0xA90000 androidboot.hardware=qcom androidboot.console=ttyMSM0 msm_rtb.filter=0x237 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.configfs=true androidboot.usbcontroller=a600000.dwc3 swiotlb=1 loop.max_part=7 printk.devkmsg=on androidboot.init_fatal_reboot_target=recovery androidboot.super_partition=system" \
@@ -112,7 +140,7 @@ jobs:
           cat << EOF > AnyKernel3/anykernel.sh
           ### AnyKernel3 Ramdisk Mod Script
           properties() { '
-          kernel.string=Custom LineageOS 22.2 Kernel (-okok-perf-${SHORT_SHA}) for Xiaomi Mi 9 Lite (pyxis)
+          kernel.string=Custom LineageOS 22.2 KernelSU (-okok-ksu-${SHORT_SHA}) for Xiaomi Mi 9 Lite (pyxis)
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -136,36 +164,37 @@ jobs:
           EOF
 
           cd AnyKernel3
-          zip -r9 ../AnyKernel3-pyxis.zip * -x .git README.md
+          zip -r9 ../AnyKernel3-pyxis-ksu.zip * -x .git README.md
           cd ..
 
       - name: Upload Boot Image & AnyKernel3 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pyxis-kernel-artifacts
+          name: pyxis-ksu-kernel-artifacts
           path: |
             new_boot.img
-            AnyKernel3-pyxis.zip
+            AnyKernel3-pyxis-ksu.zip
             arch/arm64/boot/Image
             arch/arm64/boot/Image.gz-dtb
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.ref_name == 'lineage-22.2'
+        if: startsWith(github.ref, 'refs/tags/') || github.ref_name == 'lineage-22.2-ksu'
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v-lineage-22.2' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Xiaomi Mi 9 Lite (pyxis) Kernel' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v-lineage-22.2-ksu' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Xiaomi Mi 9 Lite (pyxis) KernelSU Kernel' }}
           body: |
-            ## Custom LineageOS 22.2 Kernel for Xiaomi Mi 9 Lite (pyxis)
-            - **LOCALVERSION**: `-okok-perf-${{ env.SHORT_SHA }}`
+            ## Custom LineageOS 22.2 KernelSU Kernel for Xiaomi Mi 9 Lite (pyxis)
+            - **KernelSU Version**: Integrated (`v3.3.0`)
+            - **LOCALVERSION**: `-okok-ksu-${{ env.SHORT_SHA }}`
             - **Commit**: `${{ github.sha }}`
 
             ### Included Files:
-            - `AnyKernel3-pyxis.zip`: Flash via TWRP / Recovery
+            - `AnyKernel3-pyxis-ksu.zip`: Flash via TWRP / Recovery
             - `new_boot.img`: Flash via Fastboot (`fastboot flash boot new_boot.img`)
           files: |
             new_boot.img
-            AnyKernel3-pyxis.zip
+            AnyKernel3-pyxis-ksu.zip
             arch/arm64/boot/Image
             arch/arm64/boot/Image.gz-dtb
 
